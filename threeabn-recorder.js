@@ -577,13 +577,12 @@ async function runLoop() {
         if (currentRecording) {
           stopRecording(currentRecording.process);
           // Async cleanup of duplicates for the program we just finished
-          const oldCode = currentRecording.signature.split('/')[1].split('-')[0];
-          const oldFile = currentRecording.outFile;
-          cleanupProgramDuplicates(oldCode, oldFile).catch(e => log('Cleanup error:', e));
+          cleanupProgramDuplicates(currentRecording.programCode, currentRecording.outFile).catch(e => log('Cleanup error:', e));
         }
 
         currentRecording = {
           signature,
+          programCode: activeItem.program_code,
           process: p,
           outFile,
           endTime: activeItem.endTime
