@@ -12,10 +12,13 @@
  */
 
 import fs from 'fs';
-import { spawn } from 'child_process';
+import { spawn, exec } from 'child_process';
 import path from 'path';
 import os from 'os';
 import net from 'net';
+import util from 'util';
+
+const execPromise = util.promisify(exec);
 
 const fsp = fs.promises;
 
@@ -28,9 +31,29 @@ const MUSIC_BASE = path.join(os.homedir(), '0Radio', 'RadioMusic');
 const SONG_CACHE_FILE = path.join(MUSIC_BASE, 'song_cache.json');
 const RAND_QUEUE_FILE = path.join(MUSIC_BASE, 'randsongs.json');
 
-// Audio Device Config (Default: USB Audio Device)
-// Use 'mpv --audio-device=help' to list available devices
-const AUDIO_DEVICE = process.env.AUDIO_DEVICE || 'alsa/plughw:CARD=OtherDevice,DEV=0';
+// Audio Device Config (Default: USB Audio Device if discovered)
+let AUDIO_DEVICE = 'alsa/plughw:CARD=Device,DEV=0';
+
+async function discoverAudioDevice() {
+  if (process.env.AUDIO_DEVICE) {
+    log(`Using AUDIO_DEVICE from environment: ${process.env.AUDIO_DEVICE}`);
+    return process.env.AUDIO_DEVICE;
+  }
+
+  try {
+    const { stdout } = await execPromise("mpv --audio-device=help | grep 'USB Audio/Hardware' | cut -d \"'\" -f 2");
+    const device = stdout.trim();
+    if (device) {
+      log(`Discovered USB Audio device: ${device}`);
+      return device;
+    }
+  } catch (e) {
+    // If grep fails (no match), it exits with code 1 which exec treats as error
+  }
+
+  log('Using fallback audio device: alsa/plughw:CARD=Device,DEV=0');
+  return 'alsa/plughw:CARD=Device,DEV=0';
+}
 
 // Playback logic
 const CROSSFADE_DURATION = 5; // seconds
@@ -288,6 +311,7 @@ const library = new SongLibrary();
 // ===================== MAIN LOOP =======================
 
 async function mainLoop() {
+  AUDIO_DEVICE = await discoverAudioDevice();
   await library.loadCache();
   // Initial scan if empty logic is handled in getNextRandomSong, but good to check on boot
 
