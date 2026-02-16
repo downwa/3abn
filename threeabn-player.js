@@ -387,7 +387,7 @@ async function mainLoop() {
         let recFile = await findFile(dateStr, currentSlot.program_code);
 
         // Check if this file previously failed
-        if (recFile === failedFile) {
+        if (recFile && recFile === failedFile) {
           log(`Skipping previously failed file: ${path.basename(recFile)}`);
           recFile = null;
         }
