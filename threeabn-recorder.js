@@ -346,10 +346,91 @@ function startRecording(outFile) {
   return mpv;
 }
 
-function stopRecording(child) {
-  if (!child || child.killed) return;
-  log('Stopping mpv PID', child.pid);
-  child.kill('SIGTERM');
+async function stopRecording(child) {
+  if (child) {
+    child.kill('SIGINT'); // Graceful stop to finalize MP3
+  }
+}
+
+// ======================== CLEANUP ==========================
+
+/**
+ * Removes older files with the same program code, keeping only the most recent one.
+ */
+async function cleanupProgramDuplicates(code, keepFile) {
+  if (!code || code === 'UNK') return;
+  log(`[Cleanup] Searching for duplicates of code: ${code}`);
+
+  const files = await recursiveList(RECORD_BASE);
+  for (const f of files) {
+    if (f !== keepFile && f.includes(`-${code}-`)) {
+      try {
+        await fsp.unlink(f);
+        log(`[Cleanup] Deleted duplicate: ${path.basename(f)}`);
+      } catch (e) {
+        log(`[Cleanup] Failed to delete ${f}: ${e.message}`);
+      }
+    }
+  }
+  await removeEmptyDirs(RECORD_BASE);
+}
+
+/**
+ * Daily cleanup: Remove files > 1 year old and all empty directories.
+ */
+async function dailyLegacyCleanup() {
+  log('[Cleanup] Starting legacy 3AM purge...');
+  const oneYearAgo = Date.now() - 365 * 24 * 3600 * 1000;
+
+  const files = await recursiveList(RECORD_BASE);
+  for (const f of files) {
+    try {
+      const stats = await fsp.stat(f);
+      if (stats.mtimeMs < oneYearAgo) {
+        await fsp.unlink(f);
+        log(`[Cleanup] Deleted legacy file (>1yr): ${path.basename(f)}`);
+      }
+    } catch (e) {
+      log(`[Cleanup] Error checking ${f}: ${e.message}`);
+    }
+  }
+  await removeEmptyDirs(RECORD_BASE);
+  log('[Cleanup] Legacy purge complete.');
+}
+
+async function recursiveList(dir) {
+  let results = [];
+  try {
+    const list = await fsp.readdir(dir, { withFileTypes: true });
+    for (const entry of list) {
+      const res = path.resolve(dir, entry.name);
+      if (entry.isDirectory()) {
+        results = results.concat(await recursiveList(res));
+      } else {
+        results.push(res);
+      }
+    }
+  } catch (e) { /* ignore */ }
+  return results;
+}
+
+async function removeEmptyDirs(dir) {
+  try {
+    const list = await fsp.readdir(dir, { withFileTypes: true });
+    for (const entry of list) {
+      if (entry.isDirectory()) {
+        const res = path.resolve(dir, entry.name);
+        await removeEmptyDirs(res);
+      }
+    }
+
+    // Re-check after children cleaned
+    const remaining = await fsp.readdir(dir);
+    if (remaining.length === 0 && dir !== RECORD_BASE) {
+      await fsp.rmdir(dir);
+      log(`[Cleanup] Removed empty directory: ${dir}`);
+    }
+  } catch (e) { /* ignore */ }
 }
 
 // ======================== MAIN LOOP ==========================
@@ -358,6 +439,7 @@ async function runLoop() {
   log('Starting 3ABN Recorder Daemon (Improved)...');
 
   let currentRecording = null; // { signature, process, outFile, endTime }
+  let lastCleanupDay = '';
 
   // Initial fetch of Today and background fetch of Tomorrow
   const nowStart = new Date();
@@ -494,6 +576,10 @@ async function runLoop() {
         await sleep(2000); // 2s overlap?
         if (currentRecording) {
           stopRecording(currentRecording.process);
+          // Async cleanup of duplicates for the program we just finished
+          const oldCode = currentRecording.signature.split('/')[1].split('-')[0];
+          const oldFile = currentRecording.outFile;
+          cleanupProgramDuplicates(oldCode, oldFile).catch(e => log('Cleanup error:', e));
         }
 
         currentRecording = {
@@ -577,8 +663,12 @@ async function runLoop() {
         scheduler.ensureInBackground(formatDate(tmr));
       }
 
-      // Cleanup logic?
-      // Not implemented in this refactor but ScheduleManager could have cleanup.
+      // Cleanup logic: Daily at 3 AM
+      const currentDay = formatDate(now);
+      if (now.getHours() === 3 && currentDay !== lastCleanupDay) {
+        lastCleanupDay = currentDay;
+        dailyLegacyCleanup().catch(e => log('Legacy cleanup error:', e));
+      }
 
       // Sleep slightly
       await sleep(1000);
