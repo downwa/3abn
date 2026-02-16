@@ -28,6 +28,10 @@ const MUSIC_BASE = path.join(os.homedir(), '0Radio', 'RadioMusic');
 const SONG_CACHE_FILE = path.join(MUSIC_BASE, 'song_cache.json');
 const RAND_QUEUE_FILE = path.join(MUSIC_BASE, 'randsongs.json');
 
+// Audio Device Config (Default: USB Audio Device)
+// Use 'mpv --audio-device=help' to list available devices
+const AUDIO_DEVICE = process.env.AUDIO_DEVICE || 'alsa/plughw:CARD=OtherDevice,DEV=0';
+
 // Playback logic
 const CROSSFADE_DURATION = 5; // seconds
 
