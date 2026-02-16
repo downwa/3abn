@@ -14,3 +14,9 @@ restart-recorder:
 restart-keepalive:
 	systemctl restart --user ecreso-keepalive
 	journalctl --user -u ecreso-keepalive -f
+
+stop:
+	systemctl --user disable --now threeabn-player
+
+play:
+	systemctl --user enable --now threeabn-player
