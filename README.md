@@ -46,7 +46,7 @@ Each service is configured via constants at the top of its respective JavaScript
 *   `AUDIO_DEVICE`: Specify the MPV audio device. Selection logic:
     1.  Uses `AUDIO_DEVICE` environment variable if set.
     2.  Attempts to discover a USB Audio device via `mpv --audio-device=help`.
-    3.  Falls back to `alsa/plughw:CARD=Device,DEV=0`.
+    3.  Falls back to the system default (empty string).
 
 ### ecreso-keepalive.js
 Configure the transmitter connection in the `CONFIG` object at the top of the file:
@@ -61,33 +61,33 @@ const CONFIG = {
 };
 ```
 
-## Usage
+## Service Management
 
-Services are managed via `systemctl --user`.
+All services are managed using `systemctl --user`. You do not need `sudo` for these commands.
 
-**Start/Stop**:
+### Status and Logs
+- **Check Status**: `systemctl --user status threeabn-recorder`
+- **Follow Logs**: `journalctl --user -u threeabn-recorder -f`
+
+### Stopping and Disabling
+To stop a service and prevent it from starting on boot:
 ```bash
-systemctl --user start threeabn-player
-systemctl --user stop threeabn-player
-systemctl --user restart threeabn-recorder ecreso-keepalive
+systemctl --user disable --now threeabn-recorder
+systemctl --user disable --now threeabn-player
+systemctl --user disable --now ecreso-keepalive
 ```
 
-**View Status**:
+### Starting and Enabling
+To enable a service to start on boot and start it immediately:
 ```bash
-systemctl --user status threeabn-player
+systemctl --user enable --now threeabn-recorder
+systemctl --user enable --now threeabn-player
+systemctl --user enable --now ecreso-keepalive
 ```
 
-**View Logs**:
-Use the `--user` flag and `-f` to follow the log output in real-time.
+### Restarting
 ```bash
-# Recorder Logs
-journalctl --user -u threeabn-recorder -f
-
-# Player Logs
-journalctl --user -u threeabn-player -f
-
-# Keeper Logs
-journalctl --user -u ecreso-keepalive -f
+systemctl --user restart threeabn-recorder
 ```
 
 ## Development & Testing

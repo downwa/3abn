@@ -51,8 +51,8 @@ async function discoverAudioDevice() {
     // If grep fails (no match), it exits with code 1 which exec treats as error
   }
 
-  log('Using fallback audio device: alsa/plughw:CARD=Device,DEV=0');
-  return 'alsa/plughw:CARD=Device,DEV=0';
+  log('Using default audio device'); //: alsa/plughw:CARD=Device,DEV=0');
+  return ''; //alsa/plughw:CARD=Device,DEV=0';
 }
 
 // Playback logic
@@ -487,26 +487,15 @@ async function mainLoop() {
         // Calculate sleep time
         // Sleep = Duration - 2*Crossfade (to start next one early)
 
-        let sleepSec = 0;
-        if (!isFiller) {
-          // Recording: sleep until (SlotEnd - FadeTime)
-          // current pbSeconds is START.
-          // We passed FadeTime in crossfadeTo.
-          // So we are at START + FadeTime.
-          // SlotEnd is fixed.
-          // Sleep = SlotEnd - (START + FadeTime) - FadeTime
-          //       = SlotEnd - START - 2*FadeTime
+        let sleepSec = duration - 2 * CROSSFADE_DURATION;
 
-          if (currentSlot) {
-            // Re-find slot index to get end
-            const idx = schedule.indexOf(currentSlot);
-            const nextStart = schedule[idx + 1] ? schedule[idx + 1].secondsSinceMidnight : 86400;
-            sleepSec = (nextStart - pbSeconds) - 2 * CROSSFADE_DURATION;
-          } else {
-            sleepSec = duration - 2 * CROSSFADE_DURATION;
+        if (currentSlot) {
+          const idx = schedule.indexOf(currentSlot);
+          const nextStart = schedule[idx + 1] ? schedule[idx + 1].secondsSinceMidnight : 86400;
+          const remainingInSlot = (nextStart - pbSeconds) - 2 * CROSSFADE_DURATION;
+          if (remainingInSlot < sleepSec) {
+            sleepSec = remainingInSlot;
           }
-        } else {
-          sleepSec = duration - 2 * CROSSFADE_DURATION;
         }
 
         if (sleepSec < 0) sleepSec = 0;
