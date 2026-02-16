@@ -43,6 +43,7 @@ Each service is configured via constants at the top of its respective JavaScript
 *   `SLOT_DELAY_SECONDS`: Time shift delay in seconds (default: `7200` = 2 hours).
 *   `MUSIC_BASE`: Directory for filler music (default: `~/0Radio/RadioMusic`).
 *   `CROSSFADE_DURATION`: Crossfade overlap in seconds (default: `5`).
+*   `AUDIO_DEVICE`: MPV audio device (default: `alsa/plughw:CARD=Device,DEV=0`). Use `mpv --audio-device=help` to list devices.
 
 ### ecreso-keepalive.js
 Configure the transmitter connection in the `CONFIG` object at the top of the file:

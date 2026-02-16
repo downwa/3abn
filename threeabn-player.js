@@ -61,6 +61,7 @@ class MpvPlayer {
     try { fs.unlinkSync(this.socketPath); } catch (e) { }
 
     this.process = spawn('mpv', [
+      `--audio-device=${AUDIO_DEVICE}`,
       `--input-ipc-server=${this.socketPath}`,
       '--no-video',
       '--msg-level=all=warn', // Filter noise
