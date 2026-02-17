@@ -14,6 +14,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import puppeteer from 'puppeteer';
+import { analyzeFileForDTMF } from './dtmf-analyzer.js';
 
 const fsp = fs.promises;
 
@@ -21,12 +22,13 @@ const fsp = fs.promises;
 
 const SCHEDULE_PAGE = 'https://r.3abn.org/sched-app/#/radio';
 
-// Seconds offset to adjust between stream time and system clock.
-// Positive means: start recording this many seconds *earlier* than scheduled.
-const STREAM_OFFSET_SECONDS = 12;
-
 // Base directory for recordings.
 const RECORD_BASE = path.join(os.homedir(), '0Radio', '3abn');
+
+// Seconds offset to adjust between stream time and system clock.
+// Positive means: start recording this many seconds *earlier* than scheduled.
+let STREAM_OFFSET_SECONDS = 12;
+const OFFSET_FILE = path.join(RECORD_BASE, 'offset.json');
 
 // Streaming URL to record from.
 const STREAM_URL = 'https://war.streamguys1.com:7185/live';
@@ -62,6 +64,30 @@ function parseTimeToSeconds(timeText) {
   if (ap === 'am' && h === 12) h = 0;
   if (ap === 'pm' && h !== 12) h += 12;
   return h * 3600 + mm * 60;
+}
+
+async function loadOffset() {
+  try {
+    if (fs.existsSync(OFFSET_FILE)) {
+      const data = JSON.parse(fs.readFileSync(OFFSET_FILE, 'utf8'));
+      if (typeof data.offset === 'number') {
+        STREAM_OFFSET_SECONDS = data.offset;
+        log(`Loaded STREAM_OFFSET_SECONDS from disk: ${STREAM_OFFSET_SECONDS}`);
+      }
+    }
+  } catch (e) {
+    log('Error loading offset.json:', e.message);
+  }
+}
+
+async function saveOffset(val) {
+  try {
+    STREAM_OFFSET_SECONDS = val;
+    await fsp.writeFile(OFFSET_FILE, JSON.stringify({ offset: val, lastUpdated: new Date().toISOString() }, null, 2));
+    log(`Saved new STREAM_OFFSET_SECONDS: ${val}`);
+  } catch (e) {
+    log('Error saving offset.json:', e.message);
+  }
 }
 
 // ======================== SCHEDULE MANAGER ==========================
@@ -350,9 +376,15 @@ function startRecording(outFile) {
 
 async function stopRecording(child) {
   if (child) {
-    child.kill('SIGINT'); // Graceful stop to finalize MP3
+    return new Promise((resolve) => {
+      child.once('close', resolve);
+      child.kill('SIGINT'); // Graceful stop to finalize MP3
+      // Safety timeout
+      setTimeout(resolve, 5000);
+    });
   }
 }
+
 
 // ======================== CLEANUP ==========================
 
@@ -442,6 +474,9 @@ async function runLoop() {
 
   let currentRecording = null; // { signature, process, outFile, endTime }
   let lastCleanupDay = '';
+
+  // Load persistent offset
+  await loadOffset();
 
   // Initial fetch of Today and background fetch of Tomorrow
   const nowStart = new Date();
@@ -569,16 +604,43 @@ async function runLoop() {
         // Filename: using ideal slot duration for consistency in naming
         const hour = String(Math.floor(activeItem.secondsSinceMidnight / 3600)).padStart(2, '0');
         const outFile = path.join(recDir, `${hour}-${activeItem.program_code || 'UNK'}-${idealDuration}.mp3`);
+        const tempFile = outFile + '.tmp';
 
         // Start
-        const p = startRecording(outFile);
+        const p = startRecording(tempFile);
 
         // Overlap Handoff
         await sleep(2000); // 2s overlap?
         if (currentRecording) {
-          stopRecording(currentRecording.process);
-          // Async cleanup of duplicates for the program we just finished
-          cleanupProgramDuplicates(currentRecording.programCode, currentRecording.outFile).catch(e => log('Cleanup error:', e));
+          stopRecording(currentRecording.process).then(() => {
+            // Rename temp to final
+            try {
+              if (fs.existsSync(currentRecording.tempFile)) {
+                fs.renameSync(currentRecording.tempFile, currentRecording.outFile);
+                log(`[Atomic] Finalized recording: ${path.basename(currentRecording.outFile)}`);
+              }
+            } catch (e) {
+              log(`[Atomic] Error finalizing ${currentRecording.outFile}: ${e.message}`);
+            }
+            // Async analysis of the file we just finished
+            // Only analyze if it finishes at the end of the hour
+            if (currentRecording.endTime % 3600 === 0) {
+              analyzeFileForDTMF(currentRecording.outFile, 60000).then(tones => {
+                if (tones && tones.length > 0) {
+                  // Use the first #4 detected for calibration
+                  const tone = tones.find(t => t.digit === '#4');
+                  if (tone && tone.fromEnd) {
+                    const drift = tone.fromEnd - 13;
+                    const newOffset = Math.round((STREAM_OFFSET_SECONDS - drift) * 10) / 10;
+                    log(`[Calibration] Detected #4 at ${tone.fromEnd}s from end. Drift: ${drift.toFixed(2)}s. Adjusting offset: ${STREAM_OFFSET_SECONDS} -> ${newOffset}`);
+                    saveOffset(newOffset).catch(e => log('Calibration Save Error:', e));
+                  }
+                }
+              }).catch(e => log('DTMF Error:', e));
+            }
+            // Async cleanup of duplicates
+            cleanupProgramDuplicates(currentRecording.programCode, currentRecording.outFile).catch(e => log('Cleanup error:', e));
+          });
         }
 
         currentRecording = {
@@ -586,6 +648,7 @@ async function runLoop() {
           programCode: activeItem.program_code,
           process: p,
           outFile,
+          tempFile,
           endTime: activeItem.endTime
         };
 
