@@ -24,14 +24,17 @@ const fsp = fs.promises;
 
 // ===================== CONFIG ==========================
 
+const CROSSFADE_DURATION = 5; // seconds for the volume ramp
+const MPV_START_LAG = 5;      // estimated seconds for mpv to start and IPC to connect
 const SLOT_DELAY_SECONDS = 2 * 3600;  // 2 hours behind current time
 const SCHED_TMP_DIR = '/tmp/3abn-sched';
 const RECORD_BASE = path.join(os.homedir(), '0Radio', '3abn');
 const MUSIC_BASE = path.join(os.homedir(), '0Radio', 'RadioMusic');
 const SONG_CACHE_FILE = path.join(MUSIC_BASE, 'song_cache.json');
 const RAND_QUEUE_FILE = path.join(MUSIC_BASE, 'randsongs.json');
-const OVERRIDE_FILE = path.join(os.homedir(), '0Radio', 'overrides.json');
 const OVERRIDE_BASE = path.join(os.homedir(), '0Radio');
+const OVERRIDE_FILE = path.join(OVERRIDE_BASE, 'overrides.json');
+
 
 // Audio Device Config (Default: USB Audio Device if discovered)
 let AUDIO_DEVICE = 'alsa/plughw:CARD=Device,DEV=0';
@@ -58,8 +61,6 @@ async function discoverAudioDevice() {
 }
 
 // Playback logic
-const CROSSFADE_DURATION = 5; // seconds
-
 // ===================== UTILS =======================
 
 function log(...args) {
@@ -112,27 +113,45 @@ class MpvPlayer {
       }
     });
 
-    // Wait for socket
-    for (let i = 0; i < 20; i++) {
+    // Wait for socket file
+    let socketFound = false;
+    for (let i = 0; i < 50; i++) {
       if (this.process.exitCode !== null) {
         throw new Error(`mpv process exited early (code ${this.process.exitCode})`);
       }
-      if (fs.existsSync(this.socketPath)) break;
+      if (fs.existsSync(this.socketPath)) {
+        socketFound = true;
+        break;
+      }
       await sleep(100);
     }
+    if (!socketFound) throw new Error(`mpv socket file not found after 5s`);
 
     // Connect IPC
-    try {
+    await new Promise((resolve, reject) => {
       this.socket = net.createConnection(this.socketPath);
-      this.socket.on('error', (e) => {
-        // Ignore EPIPE/ECONNRESET if process is dead
-        if (this.process && this.process.exitCode === null) {
-          log(`[Player ${this.id}] Socket error:`, e.message);
-        }
-      });
-    } catch (e) {
-      log(`[Player ${this.id}] Failed to connect IPC:`, e.message);
-    }
+
+      const onConnect = () => {
+        this.socket.removeListener('error', onError);
+        resolve();
+      };
+      const onError = (e) => {
+        this.socket.removeListener('connect', onConnect);
+        reject(new Error(`Socket connection failed: ${e.message}`));
+      };
+
+      this.socket.once('connect', onConnect);
+      this.socket.once('error', onError);
+    });
+
+    this.socket.on('error', (e) => {
+      // Ignore EPIPE/ECONNRESET if process is dead
+      if (this.process && this.process.exitCode === null) {
+        log(`[Player ${this.id}] Socket error:`, e.message);
+      }
+    });
+
+    log(`[Player ${this.id}] IPC connected.`);
   }
 
   async setVolume(vol) {
@@ -153,6 +172,35 @@ class MpvPlayer {
     } catch (e) {
       // Ignore sync errors
     }
+  }
+
+  async getProperty(name) {
+    if (!this.socket || this.socket.destroyed || !this.socket.writable) return null;
+    return new Promise((resolve) => {
+      const requestId = Math.floor(Math.random() * 10000);
+      const onData = (data) => {
+        try {
+          const lines = data.toString().split('\n');
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            const res = JSON.parse(line);
+            if (res.request_id === requestId) {
+              this.socket.removeListener('data', onData);
+              resolve(res.data);
+              return;
+            }
+          }
+        } catch (e) { }
+      };
+      this.socket.on('data', onData);
+      const cmd = JSON.stringify({ command: ['get_property', name], request_id: requestId }) + '\n';
+      this.socket.write(cmd);
+      // Timeout
+      setTimeout(() => {
+        this.socket.removeListener('data', onData);
+        resolve(null);
+      }, 1000);
+    });
   }
 
   stop() {
@@ -374,15 +422,22 @@ async function mainLoop() {
     log(`Crossfading to ${path.basename(file)}...`);
     next.initialVolume = isDucked ? 10 : 0;
     await next.start(file, startOffset);
-    // If not ducked, it starts at 0 and fades to 100.
-    // If ducked, it starts at 10 and stays at 10.
 
     if (isDucked) {
-      // No fade needed, just switch
       activePlayer = next;
       if (current) current.stop();
       return;
     }
+
+    // Wait for actual playback to start before ramping
+    log(`[Player ${next.id}] Waiting for playback to start...`);
+    for (let i = 0; i < 50; i++) {
+      const pos = await next.getProperty('time-pos');
+      if (pos !== null && pos > 0) break;
+      await sleep(100);
+    }
+
+    log(`[Player ${next.id}] Playback started, beginning ramp.`);
 
     // Animate
     const steps = 20;
@@ -538,17 +593,17 @@ async function mainLoop() {
 
       if (fileToPlay) {
 
-        await crossfadeTo(fileToPlay, offset);
-
         // Calculate sleep time
-        // Sleep = Duration - 2*Crossfade (to start next one early)
+        // We want the crossfade animation to FINISH at the ideal end time.
+        // Total transition time = MPV_START_LAG + CROSSFADE_DURATION.
+        const transitionTotal = MPV_START_LAG + CROSSFADE_DURATION;
 
-        let sleepSec = duration - 2 * CROSSFADE_DURATION;
+        let sleepSec = duration - transitionTotal;
 
         if (currentSlot) {
           const idx = schedule.indexOf(currentSlot);
           const nextStart = schedule[idx + 1] ? schedule[idx + 1].secondsSinceMidnight : 86400;
-          const remainingInSlot = (nextStart - pbSeconds) - 2 * CROSSFADE_DURATION;
+          const remainingInSlot = (nextStart - pbSeconds) - transitionTotal;
           if (remainingInSlot < sleepSec) {
             sleepSec = remainingInSlot;
           }
@@ -556,19 +611,16 @@ async function mainLoop() {
 
         if (sleepSec < 0) sleepSec = 0;
 
-        log(`Playing ${path.basename(fileToPlay)} (Remaining: ${sleepSec}s)`);
-
         // Monitor Playback with Override Checking
         const runPlayback = async (totalSec) => {
           let elapsed = 0;
           while (elapsed < totalSec) {
-            // Check for Overrides
+            // Check for Overrides (Wall Clock Local Time)
             const nowReal = new Date();
-            const pbNow = new Date(nowReal.getTime() - SLOT_DELAY_SECONDS * 1000);
-            const pbSecs = pbNow.getHours() * 3600 + pbNow.getMinutes() * 60 + pbNow.getSeconds();
+            const realSecs = nowReal.getHours() * 3600 + nowReal.getMinutes() * 60 + nowReal.getSeconds();
 
             await overrideManager.reloadIfStale();
-            const ovr = overrideManager.getMatchingOverride(pbNow, pbSecs);
+            const ovr = overrideManager.getMatchingOverride(nowReal, realSecs);
 
             if (ovr) {
               log(`[Override] Triggering ${path.basename(ovr.path)} for ${ovr.duration}s`);
@@ -615,6 +667,9 @@ async function mainLoop() {
             if (activePlayer && activePlayer.process && activePlayer.process.exitCode !== null) {
               throw new Error(`MPV exited early (code ${activePlayer.process.exitCode})`);
             }
+            if (activePlayer && (!activePlayer.socket || activePlayer.socket.destroyed)) {
+              throw new Error(`MPV IPC socket is dead or missing`);
+            }
 
             await sleep(1000);
             elapsed += 1;
@@ -625,6 +680,8 @@ async function mainLoop() {
         };
 
         try {
+          await crossfadeTo(fileToPlay, offset);
+          log(`Playing ${path.basename(fileToPlay)} (Remaining: ${sleepSec}s)`);
           await runPlayback(sleepSec);
         } catch (e) {
           log(`Playback Error: ${e.message}`);
