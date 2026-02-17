@@ -69,9 +69,10 @@ class MpvPlayer {
   }
 
   async start(file, startTime = 0) {
-    log(`[Player ${this.id}] Starting mpv on ${path.basename(file)} from ${startTime}s`);
-
+    this.stop(); // Ensure cold start for this instance
     this.stopping = false;
+
+    log(`[Player ${this.id}] Starting mpv on ${path.basename(file)} from ${startTime}s`);
 
     // Ensure socket doesn't exist
     try { fs.unlinkSync(this.socketPath); } catch (e) { }
@@ -338,7 +339,12 @@ async function mainLoop() {
 
     log(`Crossfading to ${path.basename(file)}...`);
     next.initialVolume = isDucked ? 10 : 0;
-    await next.start(file, startOffset);
+    try {
+      await next.start(file, startOffset);
+    } catch (e) {
+      next.stop();
+      throw e;
+    }
 
     if (isDucked) {
       activePlayer = next;
@@ -606,6 +612,14 @@ async function mainLoop() {
           await runPlayback(sleepSec);
         } catch (e) {
           log(`Playback Error: ${e.message}`);
+
+          // If we have an active player still running, it might be holding the audio device.
+          // On retry, we should stop it to give the next attempt a chance to grab the hardware.
+          if (activePlayer) {
+            log(`Stopping active player ${activePlayer.id} to free resources for retry.`);
+            activePlayer.stop();
+          }
+
           // Retry Logic
           if (retryCount < 1) {
             log('Retrying once in 1s...');
