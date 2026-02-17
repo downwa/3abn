@@ -38,17 +38,18 @@ const OVERRIDE_FILE = path.join(OVERRIDE_BASE, 'overrides.json');
 let AUDIO_DEVICE = 'alsa/plughw:CARD=Device,DEV=0';
 
 async function discoverAudioDevice() {
+  if (process.env.AUDIO_DEVICE) {
+    log(`Using audio device from environment: ${process.env.AUDIO_DEVICE}`);
+    return process.env.AUDIO_DEVICE;
+  }
+
   try {
-    const { stdout } = await execPromise('aplay -l');
-    const lines = stdout.split('\n');
-    for (const line of lines) {
-      if (line.includes('USB Audio Device') || line.includes('USB PnP Audio Device')) {
-        const m = line.match(/card (\d+):.*device (\d+):/);
-        if (m) {
-          log(`Discovered USB Audio at card ${m[1]}, device ${m[2]}`);
-          return `alsa/plughw:CARD=${m[1]},DEV=${m[2]}`;
-        }
-      }
+    const cmd = "mpv --audio-device=help | grep 'USB Audio/Hardware' | cut -d \"'\" -f 2";
+    const { stdout } = await execPromise(cmd);
+    const device = stdout.trim();
+    if (device) {
+      log(`Discovered USB Audio device: ${device}`);
+      return device;
     }
   } catch (e) {
     log('Audio discovery failed, falling back to system default.');
