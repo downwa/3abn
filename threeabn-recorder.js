@@ -27,7 +27,7 @@ const RECORD_BASE = path.join(os.homedir(), '0Radio', '3abn');
 
 // Seconds offset to adjust between stream time and system clock.
 // Positive means: start recording this many seconds *earlier* than scheduled.
-let STREAM_OFFSET_SECONDS = 12;
+let STREAM_OFFSET_SECONDS = 10;
 const OFFSET_FILE = path.join(RECORD_BASE, 'offset.json');
 
 // Streaming URL to record from.
