@@ -30,7 +30,7 @@ const RECORD_BASE = path.join(os.homedir(), '0Radio', '3abn');
 const MUSIC_BASE = path.join(os.homedir(), '0Radio', 'RadioMusic');
 const SONG_CACHE_FILE = path.join(MUSIC_BASE, 'song_cache.json');
 const RAND_QUEUE_FILE = path.join(MUSIC_BASE, 'randsongs.json');
-const OVERRIDE_FILE = path.join(os.homedir(), '0Radio', 'scheduled.txt');
+const OVERRIDE_FILE = path.join(os.homedir(), '0Radio', 'overrides.json');
 const OVERRIDE_BASE = path.join(os.homedir(), '0Radio');
 
 // Audio Device Config (Default: USB Audio Device if discovered)
@@ -321,23 +321,12 @@ class OverrideManager {
 
     try {
       const data = await fsp.readFile(OVERRIDE_FILE, 'utf-8');
-      const lines = data.split('\n');
-      const parsed = [];
-      for (let line of lines) {
-        line = line.trim();
-        if (!line || line.startsWith('#')) continue;
-        const [day, time, durStr, ...pathParts] = line.split(/\s+/);
-        const relPath = pathParts.join(' ');
-        const absPath = path.resolve(OVERRIDE_BASE, relPath);
-        parsed.push({
-          day, // Any, Sun, Mon...
-          time, // HH:MM:SS
-          seconds: this.parseTimeToSeconds(time),
-          duration: parseInt(durStr, 10),
-          path: absPath
-        });
-      }
-      this.overrides = parsed;
+      const parsed = JSON.parse(data);
+      this.overrides = parsed.map(o => ({
+        ...o,
+        seconds: this.parseTimeToSeconds(o.time),
+        path: path.resolve(OVERRIDE_BASE, o.path)
+      }));
       // log(`Loaded ${this.overrides.length} overrides from ${OVERRIDE_FILE}`);
     } catch (e) {
       if (e.code !== 'ENOENT') log('Error loading overrides:', e.message);
