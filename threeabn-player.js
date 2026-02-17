@@ -35,7 +35,7 @@ const OVERRIDE_FILE = path.join(OVERRIDE_BASE, 'overrides.json');
 
 
 // Audio Device Config (Default: USB Audio Device if discovered)
-let AUDIO_DEVICE = 'alsa/plughw:CARD=Device,DEV=0';
+let AUDIO_DEVICE = 'pulse/alsa_output.usb-C-Media_Electronics_Inc._USB_PnP_Sound_Device-00.analog-stereo';
 
 async function discoverAudioDevice() {
   if (process.env.AUDIO_DEVICE) {
@@ -44,7 +44,7 @@ async function discoverAudioDevice() {
   }
 
   try {
-    const cmd = "mpv --audio-device=help | grep 'USB Audio/Hardware' | cut -d \"'\" -f 2";
+    const cmd = "mpv --audio-device=help | grep 'pulse/.*usb' | cut -d \"'\" -f 2";
     const { stdout } = await execPromise(cmd);
     const device = stdout.trim();
     if (device) {
