@@ -3,7 +3,7 @@
 /**
  * 3ABN Radio recorder daemon using Puppeteer + mpv.
  *
- * - Fetches daily schedule via SPA at https://r.3abn.org/sched-app/#/
+ * - Fetches daily schedule via SPA at https://r.3abn.org/sched-app/#/radio
  * - Records each upcoming program from the live stream.
  * - Manages Day Boundaries seamlessly by refetching schedules.
  * - Uses mpv --stream-dump with overlap handoff.
@@ -18,6 +18,8 @@ import puppeteer from 'puppeteer';
 const fsp = fs.promises;
 
 // ======================== CONFIGURATION ==========================
+
+const SCHEDULE_PAGE = 'https://r.3abn.org/sched-app/#/radio';
 
 // Seconds offset to adjust between stream time and system clock.
 // Positive means: start recording this many seconds *earlier* than scheduled.
@@ -147,7 +149,7 @@ class ScheduleManager {
 
       // Attempt to go to specific date if URL param supported (unlikely but harmless to try?)
       // Actually, let's just go to root.
-      await page.goto('https://r.3abn.org/sched-app/#/radio', { waitUntil: 'networkidle0', timeout: 60000 });
+      await page.goto(SCHEDULE_PAGE, { waitUntil: 'networkidle0', timeout: 60000 });
       await sleep(5000);
 
       // Check current displayed date?

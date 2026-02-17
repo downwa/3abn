@@ -25,7 +25,7 @@ const fsp = fs.promises;
 // ===================== CONFIG ==========================
 
 const CROSSFADE_DURATION = 5; // seconds for the volume ramp
-const MPV_START_LAG = 5;      // estimated seconds for mpv to start and IPC to connect
+const MPV_START_LAG = 8;      // estimated seconds for mpv to start and IPC to connect
 const SLOT_DELAY_SECONDS = 2 * 3600;  // 2 hours behind current time
 const SCHED_TMP_DIR = '/tmp/3abn-sched';
 const RECORD_BASE = path.join(os.homedir(), '0Radio', '3abn');
@@ -82,6 +82,7 @@ class MpvPlayer {
     this.socketPath = `/tmp/mpv-socket-${id}`;
     this.process = null;
     this.socket = null;
+    this.stopping = false;
   }
 
   async start(file, startTime = 0) {
@@ -163,12 +164,9 @@ class MpvPlayer {
 
     try {
       const cmd = JSON.stringify({ command: ['set_property', 'volume', vol] }) + '\n';
-      this.socket.write(cmd, (err) => {
-        if (err) {
-          // Log verbose only?
-          // log(`[Player ${this.id}] Write error:`, err.message);
-        }
-      });
+      if (this.socket && !this.socket.destroyed && this.socket.writable) {
+        this.socket.write(cmd, (err) => { });
+      }
     } catch (e) {
       // Ignore sync errors
     }
@@ -204,6 +202,7 @@ class MpvPlayer {
   }
 
   stop() {
+    this.stopping = true;
     if (this.process) {
       this.process.kill(); // Terminate
       this.process = null;
@@ -613,8 +612,10 @@ async function mainLoop() {
 
         // Monitor Playback with Override Checking
         const runPlayback = async (totalSec) => {
-          let elapsed = 0;
-          while (elapsed < totalSec) {
+          const startTime = Date.now();
+          const endTime = startTime + totalSec * 1000;
+
+          while (Date.now() < endTime) {
             // Check for Overrides (Wall Clock Local Time)
             const nowReal = new Date();
             const realSecs = nowReal.getHours() * 3600 + nowReal.getMinutes() * 60 + nowReal.getSeconds();
@@ -664,18 +665,18 @@ async function mainLoop() {
               log('[Override] Finished.');
             }
 
-            if (activePlayer && activePlayer.process && activePlayer.process.exitCode !== null) {
+            if (activePlayer && activePlayer.process && activePlayer.process.exitCode !== null && !activePlayer.stopping) {
               throw new Error(`MPV exited early (code ${activePlayer.process.exitCode})`);
             }
-            if (activePlayer && (!activePlayer.socket || activePlayer.socket.destroyed)) {
+            if (activePlayer && !activePlayer.stopping && (!activePlayer.socket || activePlayer.socket.destroyed)) {
               throw new Error(`MPV IPC socket is dead or missing`);
             }
 
-            await sleep(1000);
-            elapsed += 1;
-
-            // If we are nearing the end of slot while an override was playing, we might have overshot.
-            // The loop condition elapsed < totalSec handles this.
+            // Sleep 1s but don't overshoot
+            const remaining = endTime - Date.now();
+            if (remaining > 0) {
+              await sleep(Math.min(1000, remaining));
+            }
           }
         };
 
