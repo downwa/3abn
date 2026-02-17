@@ -30,6 +30,8 @@ const RECORD_BASE = path.join(os.homedir(), '0Radio', '3abn');
 const MUSIC_BASE = path.join(os.homedir(), '0Radio', 'RadioMusic');
 const SONG_CACHE_FILE = path.join(MUSIC_BASE, 'song_cache.json');
 const RAND_QUEUE_FILE = path.join(MUSIC_BASE, 'randsongs.json');
+const OVERRIDE_FILE = path.join(os.homedir(), '0Radio', 'scheduled.txt');
+const OVERRIDE_BASE = path.join(os.homedir(), '0Radio');
 
 // Audio Device Config (Default: USB Audio Device if discovered)
 let AUDIO_DEVICE = 'alsa/plughw:CARD=Device,DEV=0';
@@ -93,7 +95,7 @@ class MpvPlayer {
       '--no-video',
       '--msg-level=all=warn', // Filter noise
       '--no-terminal',        // Prevent status line control chars
-      '--volume=0', // Start silent for crossfade
+      `--volume=${this.initialVolume || 0}`, // Start silent or ducked
       `--start=${startTime}`,
       file
     ], { stdio: ['ignore', 'ignore', 'pipe'] }); // Capture stderr
@@ -306,6 +308,60 @@ class SongLibrary {
   }
 }
 
+class OverrideManager {
+  constructor() {
+    this.overrides = [];
+    this.lastLoad = 0;
+  }
+
+  async reloadIfStale() {
+    const now = Date.now();
+    if (now - this.lastLoad < 60000) return; // Once per min
+    this.lastLoad = now;
+
+    try {
+      const data = await fsp.readFile(OVERRIDE_FILE, 'utf-8');
+      const lines = data.split('\n');
+      const parsed = [];
+      for (let line of lines) {
+        line = line.trim();
+        if (!line || line.startsWith('#')) continue;
+        const [day, time, durStr, ...pathParts] = line.split(/\s+/);
+        const relPath = pathParts.join(' ');
+        const absPath = path.resolve(OVERRIDE_BASE, relPath);
+        parsed.push({
+          day, // Any, Sun, Mon...
+          time, // HH:MM:SS
+          seconds: this.parseTimeToSeconds(time),
+          duration: parseInt(durStr, 10),
+          path: absPath
+        });
+      }
+      this.overrides = parsed;
+      // log(`Loaded ${this.overrides.length} overrides from ${OVERRIDE_FILE}`);
+    } catch (e) {
+      if (e.code !== 'ENOENT') log('Error loading overrides:', e.message);
+      this.overrides = [];
+    }
+  }
+
+  parseTimeToSeconds(t) {
+    const [h, m, s] = t.split(':').map(x => parseInt(x, 10));
+    return h * 3600 + m * 60 + s;
+  }
+
+  getMatchingOverride(date, secondsSinceMidnight) {
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const currentDay = days[date.getDay()];
+
+    return this.overrides.find(o => {
+      const dayMatch = (o.day === 'Any' || o.day === currentDay);
+      return dayMatch && o.seconds === secondsSinceMidnight;
+    });
+  }
+}
+
+const overrideManager = new OverrideManager();
 const library = new SongLibrary();
 
 // ===================== MAIN LOOP =======================
@@ -317,7 +373,9 @@ async function mainLoop() {
 
   const player1 = new MpvPlayer(1);
   const player2 = new MpvPlayer(2);
+  const player3 = new MpvPlayer(3); // Override player
   let activePlayer = null; // ref to p1 or p2
+  let isDucked = false;
 
   // Helper to crossfade to new file
   const crossfadeTo = async (file, startOffset = 0) => {
@@ -325,8 +383,17 @@ async function mainLoop() {
     const current = activePlayer;
 
     log(`Crossfading to ${path.basename(file)}...`);
+    next.initialVolume = isDucked ? 10 : 0;
     await next.start(file, startOffset);
-    await next.setVolume(0);
+    // If not ducked, it starts at 0 and fades to 100.
+    // If ducked, it starts at 10 and stays at 10.
+
+    if (isDucked) {
+      // No fade needed, just switch
+      activePlayer = next;
+      if (current) current.stop();
+      return;
+    }
 
     // Animate
     const steps = 20;
@@ -500,34 +567,76 @@ async function mainLoop() {
 
         if (sleepSec < 0) sleepSec = 0;
 
-        log(`Playing ${path.basename(fileToPlay)} (Sleep: ${sleepSec}s)`);
+        log(`Playing ${path.basename(fileToPlay)} (Remaining: ${sleepSec}s)`);
 
-        // Monitor Playback Helper
-        const monitorPlayback = (ms) => {
-          return new Promise((resolve, reject) => {
-            const proc = activePlayer ? activePlayer.process : null;
-            let completed = false;
+        // Monitor Playback with Override Checking
+        const runPlayback = async (totalSec) => {
+          let elapsed = 0;
+          while (elapsed < totalSec) {
+            // Check for Overrides
+            const nowReal = new Date();
+            const pbNow = new Date(nowReal.getTime() - SLOT_DELAY_SECONDS * 1000);
+            const pbSecs = pbNow.getHours() * 3600 + pbNow.getMinutes() * 60 + pbNow.getSeconds();
 
-            const timer = setTimeout(() => {
-              completed = true;
-              resolve();
-            }, ms);
+            await overrideManager.reloadIfStale();
+            const ovr = overrideManager.getMatchingOverride(pbNow, pbSecs);
 
-            if (proc) {
-              proc.once('close', (code) => {
-                if (!completed) {
-                  clearTimeout(timer);
-                  reject(new Error(`MPV exited early (code ${code})`));
-                }
-              });
-            } else {
-              resolve();
+            if (ovr) {
+              log(`[Override] Triggering ${path.basename(ovr.path)} for ${ovr.duration}s`);
+              // Duck
+              isDucked = true;
+              for (let v = 100; v >= 10; v -= 10) {
+                player1.setVolume(v);
+                player2.setVolume(v);
+                await sleep(100);
+              }
+
+              // Play Override
+              player3.initialVolume = 100;
+              await player3.start(ovr.path);
+
+              const ovrDur = ovr.duration;
+              const ovrSteps = 10;
+              // Fade in override
+              for (let v = 0; v <= 100; v += 10) {
+                player3.setVolume(v);
+                await sleep(100);
+              }
+
+              // Wait for override duration (minus fades)
+              await sleep((ovrDur - 2) * 1000);
+
+              // Fade out override
+              for (let v = 100; v >= 0; v -= 10) {
+                player3.setVolume(v);
+                await sleep(100);
+              }
+              player3.stop();
+
+              // Unduck
+              isDucked = false;
+              for (let v = 10; v <= 100; v += 10) {
+                player1.setVolume(v);
+                player2.setVolume(v);
+                await sleep(100);
+              }
+              log('[Override] Finished.');
             }
-          });
+
+            if (activePlayer && activePlayer.process && activePlayer.process.exitCode !== null) {
+              throw new Error(`MPV exited early (code ${activePlayer.process.exitCode})`);
+            }
+
+            await sleep(1000);
+            elapsed += 1;
+
+            // If we are nearing the end of slot while an override was playing, we might have overshot.
+            // The loop condition elapsed < totalSec handles this.
+          }
         };
 
         try {
-          await monitorPlayback(sleepSec * 1000);
+          await runPlayback(sleepSec);
         } catch (e) {
           log(`Playback Error: ${e.message}`);
           // Retry Logic
