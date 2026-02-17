@@ -1,26 +1,24 @@
 #!/usr/bin/env node
 
 /**
- * 3ABN Radio Player Daemon (Improved)
+ * 3ABN Radio player daemon using mpv and IPC.
  *
- * Features:
- * - Plays scheduled content with fallback search.
- * - Time-shifted playback (2 hours delay).
- * - Fills gaps with random songs from local library.
- * - Uses mpv + IPC for crossfading.
- * - Caches song lengths to optimize filling.
+ * - Manages crossfading between recordings and filler music.
+ * - Enforces slot boundaries from schedule.
+ * - Handles missing recordings by searching past days.
+ * - Provides Station ID overrides with ducking.
  */
 
+import { spawn } from 'child_process';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import fs from 'fs';
-import { spawn, exec } from 'child_process';
+import fsp from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import net from 'net';
-import util from 'util';
 
-const execPromise = util.promisify(exec);
-
-const fsp = fs.promises;
+const execPromise = promisify(exec);
 
 // ===================== CONFIG ==========================
 
@@ -29,7 +27,7 @@ const MPV_START_LAG = 8;      // estimated seconds for mpv to start and IPC to c
 const SLOT_DELAY_SECONDS = 2 * 3600;  // 2 hours behind current time
 const SCHED_TMP_DIR = '/tmp/3abn-sched';
 const RECORD_BASE = path.join(os.homedir(), '0Radio', '3abn');
-const MUSIC_BASE = path.join(os.homedir(), '0Radio', 'RadioMusic');
+const MUSIC_BASE = path.join(os.homedir(), '0Radio', 'Music');
 const SONG_CACHE_FILE = path.join(MUSIC_BASE, 'song_cache.json');
 const RAND_QUEUE_FILE = path.join(MUSIC_BASE, 'randsongs.json');
 const OVERRIDE_BASE = path.join(os.homedir(), '0Radio');
@@ -40,42 +38,26 @@ const OVERRIDE_FILE = path.join(OVERRIDE_BASE, 'overrides.json');
 let AUDIO_DEVICE = 'alsa/plughw:CARD=Device,DEV=0';
 
 async function discoverAudioDevice() {
-  if (process.env.AUDIO_DEVICE) {
-    log(`Using AUDIO_DEVICE from environment: ${process.env.AUDIO_DEVICE}`);
-    return process.env.AUDIO_DEVICE;
-  }
-
   try {
-    const { stdout } = await execPromise("mpv --audio-device=help | grep 'USB Audio/Hardware' | cut -d \"'\" -f 2");
-    const device = stdout.trim();
-    if (device) {
-      log(`Discovered USB Audio device: ${device}`);
-      return device;
+    const { stdout } = await execPromise('aplay -l');
+    const lines = stdout.split('\n');
+    for (const line of lines) {
+      if (line.includes('USB Audio Device') || line.includes('USB PnP Audio Device')) {
+        const m = line.match(/card (\d+):.*device (\d+):/);
+        if (m) {
+          log(`Discovered USB Audio at card ${m[1]}, device ${m[2]}`);
+          return `alsa/plughw:CARD=${m[1]},DEV=${m[2]}`;
+        }
+      }
     }
   } catch (e) {
-    // If grep fails (no match), it exits with code 1 which exec treats as error
+    log('Audio discovery failed, falling back to system default.');
   }
-
-  log('Using default audio device'); //: alsa/plughw:CARD=Device,DEV=0');
-  return ''; //alsa/plughw:CARD=Device,DEV=0';
+  return ''; // Default
 }
 
-// Playback logic
-// ===================== UTILS =======================
+// ===================== PLAYER ==========================
 
-function log(...args) {
-  console.log(new Date().toISOString(), '-', ...args);
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function formatDate(d) {
-  return d.toISOString().slice(0, 10);
-}
-
-// Simple wrapper for mpv IPC
 class MpvPlayer {
   constructor(id) {
     this.id = id;
@@ -87,6 +69,8 @@ class MpvPlayer {
 
   async start(file, startTime = 0) {
     log(`[Player ${this.id}] Starting mpv on ${path.basename(file)} from ${startTime}s`);
+
+    this.stopping = false;
 
     // Ensure socket doesn't exist
     try { fs.unlinkSync(this.socketPath); } catch (e) { }
@@ -109,7 +93,7 @@ class MpvPlayer {
     });
 
     this.process.on('close', (code) => {
-      if (code !== 0 && code !== null) {
+      if (code !== 0 && code !== null && !this.stopping) {
         log(`[Player ${this.id}] mpv exited with code ${code}`);
       }
     });
@@ -146,8 +130,8 @@ class MpvPlayer {
     });
 
     this.socket.on('error', (e) => {
-      // Ignore EPIPE/ECONNRESET if process is dead
-      if (this.process && this.process.exitCode === null) {
+      // Ignore EPIPE/ECONNRESET if process is dead or intentionally stopping
+      if (this.process && this.process.exitCode === null && !this.stopping) {
         log(`[Player ${this.id}] Socket error:`, e.message);
       }
     });
@@ -155,12 +139,8 @@ class MpvPlayer {
     log(`[Player ${this.id}] IPC connected.`);
   }
 
-  async setVolume(vol) {
-    // vol 0-100
+  setVolume(vol) {
     if (!this.socket || this.socket.destroyed || !this.socket.writable) return;
-
-    // Double check process
-    if (this.process && this.process.exitCode !== null) return;
 
     try {
       const cmd = JSON.stringify({ command: ['set_property', 'volume', vol] }) + '\n';
@@ -215,134 +195,49 @@ class MpvPlayer {
   }
 }
 
-
-// ===================== SONG LIBRARY & CACHE =======================
+// ===================== LIBRARY =======================
 
 class SongLibrary {
   constructor() {
-    this.cache = {}; // path -> duration
-    this.scanning = false;
+    this.cache = {}; // file -> duration
+    this.queue = [];
   }
 
   async loadCache() {
     try {
-      const data = await fsp.readFile(SONG_CACHE_FILE, 'utf-8');
-      this.cache = JSON.parse(data);
-    } catch (e) {
-      log('No song cache found, scanning needed.');
-    }
-  }
-
-  async scanLibrary() {
-    if (this.scanning) return;
-    this.scanning = true;
-    log('Scanning music library...');
-
-    try {
-      const files = await this.recursiveFind(MUSIC_BASE);
-
-      let changed = false;
-      for (const f of files) {
-        if (!this.cache[f]) {
-          const dur = await this.getDuration(f);
-          if (dur > 0) {
-            this.cache[f] = dur;
-            changed = true;
-          }
-        }
+      if (fs.existsSync(SONG_CACHE_FILE)) {
+        this.cache = JSON.parse(await fsp.readFile(SONG_CACHE_FILE, 'utf-8'));
       }
-
-      if (changed) {
-        await fsp.mkdir(MUSIC_BASE, { recursive: true });
-        await fsp.writeFile(SONG_CACHE_FILE, JSON.stringify(this.cache, null, 2));
-        log(`Updated song cache with ${Object.keys(this.cache).length} songs.`);
+      if (fs.existsSync(RAND_QUEUE_FILE)) {
+        this.queue = JSON.parse(await fsp.readFile(RAND_QUEUE_FILE, 'utf-8'));
       }
-    } catch (e) {
-      log('Error scanning library:', e);
-    } finally {
-      this.scanning = false;
-    }
-  }
-
-  async recursiveFind(dir) {
-    let results = [];
-    try {
-      const list = await fsp.readdir(dir);
-      for (const f of list) {
-        const full = path.join(dir, f);
-        // Check if dir
-        let stat;
-        try {
-          stat = await fsp.stat(full);
-        } catch (e) { continue; }
-
-        if (stat.isDirectory()) {
-          results = results.concat(await this.recursiveFind(full));
-        } else if (/\.(mp3|ogg)$/i.test(f)) {
-          results.push(full);
-        }
-      }
-    } catch (e) {
-      log('Error scanning dir:', dir, e.message);
-    }
-    return results;
+    } catch (e) { }
   }
 
   async getDuration(file) {
-    return new Promise(resolve => {
-      const child = spawn('ffprobe', [
-        '-v', 'error',
-        '-show_entries', 'format=duration',
-        '-of', 'default=noprint_wrappers=1:nokey=1',
-        file
-      ]);
-      let out = '';
-      child.stdout.on('data', d => out += d);
-      child.on('close', () => {
-        const d = parseFloat(out.trim());
-        resolve(isNaN(d) ? 0 : d);
-      });
-    });
+    if (this.cache[file]) return this.cache[file];
+    try {
+      const { stdout } = await execPromise(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${file}"`);
+      const dur = parseFloat(stdout.trim());
+      if (!isNaN(dur)) {
+        this.cache[file] = dur;
+        fsp.writeFile(SONG_CACHE_FILE, JSON.stringify(this.cache, null, 2)).catch(() => { });
+        return dur;
+      }
+    } catch (e) { }
+    return 0;
   }
 
   async getNextRandomSong() {
-    // Read Queue
-    let queue = [];
-    try {
-      queue = JSON.parse(await fsp.readFile(RAND_QUEUE_FILE, 'utf-8'));
-    } catch (e) { }
-
-    if (queue.length === 0) {
-      log('Queue empty, regenerating...');
-      if (Object.keys(this.cache).length === 0) await this.scanLibrary();
-
-      // Queue is list of paths
-      const all = Object.keys(this.cache);
-      if (all.length === 0) return null;
-
-      // Shuffle
-      for (let i = all.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [all[i], all[j]] = [all[j], all[i]];
-      }
-      queue = all;
-      await fsp.writeFile(RAND_QUEUE_FILE, JSON.stringify(queue));
+    if (!this.queue.length) {
+      log('Queue empty, scanning music library...');
+      await this.rescan();
     }
+    const next = this.queue.shift();
+    await fsp.writeFile(RAND_QUEUE_FILE, JSON.stringify(this.queue, null, 2));
 
-    const next = queue.shift();
-    await fsp.writeFile(RAND_QUEUE_FILE, JSON.stringify(queue));
-
-    // Verify duration
     let dur = this.cache[next];
     if (!dur) {
-      log(`Duration missing for ${path.basename(next)}, probing...`);
-
-      // Trigger background scan if cache might be incomplete/deleted
-      if (!this.scanning) {
-        log('Triggering background library scan to restore cache...');
-        this.scanLibrary().catch(e => log('Background scan failed:', e));
-      }
-
       dur = await this.getDuration(next);
       if (dur > 0) {
         this.cache[next] = dur;
@@ -352,6 +247,28 @@ class SongLibrary {
     }
 
     return { path: next, duration: dur || 0 };
+  }
+
+  async rescan() {
+    const walk = async (dir) => {
+      let files = [];
+      const list = await fsp.readdir(dir, { withFileTypes: true });
+      for (const entry of list) {
+        const res = path.resolve(dir, entry.name);
+        if (entry.isDirectory()) files = files.concat(await walk(res));
+        else if (entry.name.endsWith('.mp3') || entry.name.endsWith('.ogg')) files.push(res);
+      }
+      return files;
+    };
+    const all = await walk(MUSIC_BASE);
+    // Shuffle
+    for (let i = all.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [all[i], all[j]] = [all[j], all[i]];
+    }
+    this.queue = all;
+    await fsp.writeFile(RAND_QUEUE_FILE, JSON.stringify(this.queue, null, 2));
+    log(`Queued ${all.length} songs.`);
   }
 }
 
@@ -431,6 +348,9 @@ async function mainLoop() {
     // Wait for actual playback to start before ramping
     log(`[Player ${next.id}] Waiting for playback to start...`);
     for (let i = 0; i < 50; i++) {
+      if (next.process.exitCode !== null) {
+        throw new Error(`mpv process exited early (code ${next.process.exitCode})`);
+      }
       const pos = await next.getProperty('time-pos');
       if (pos !== null && pos > 0) break;
       await sleep(100);
@@ -638,7 +558,6 @@ async function mainLoop() {
               await player3.start(ovr.path);
 
               const ovrDur = ovr.duration;
-              const ovrSteps = 10;
               // Fade in override
               for (let v = 0; v <= 100; v += 10) {
                 player3.setVolume(v);
@@ -716,3 +635,18 @@ async function mainLoop() {
 
 // Start
 mainLoop().catch(e => { console.error(e); process.exit(1); });
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function log(...args) {
+  console.log(new Date().toISOString(), '-', ...args);
+}
+
+function formatDate(d) {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}

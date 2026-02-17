@@ -519,17 +519,14 @@ async function runLoop() {
         }
 
         // LATE CHECK
-        if (secondsPastStart > GRACE_PERIOD_SECONDS) {
-          // TOO LATE
-          // Log and Skip
-          // We only log once per slot? 
-          // We need a way to track "skipped" so we don't log spam.
-          // Using signature check: if we skipped, we won't have currentRecording matching.
-          // But we don't want to spam "Too late".
-          // We can sleep for remaining time in slot.
+        // Use actual wall-clock time to decide if we are too late for the program.
+        const wallClockSecs = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+        const secondsFoundLate = wallClockSecs - activeItem.secondsSinceMidnight;
 
+        if (secondsFoundLate > GRACE_PERIOD_SECONDS) {
+          // TOO LATE
           const remaining = activeItem.endTime - nowSeconds;
-          log(`Too late to start ${activeItem.program_code} (${secondsPastStart}s > ${GRACE_PERIOD_SECONDS}s grace). Skipping.`);
+          log(`Too late to start ${activeItem.program_code} (${secondsFoundLate}s > ${GRACE_PERIOD_SECONDS}s grace). Skipping.`);
           log(`Sleeping ${remaining}s until next slot.`);
 
           if (remaining > 0) await sleep(remaining * 1000);
