@@ -21,7 +21,7 @@ const fsp = fs.promises;
 
 // Seconds offset to adjust between stream time and system clock.
 // Positive means: start recording this many seconds *earlier* than scheduled.
-const STREAM_OFFSET_SECONDS = 10;
+const STREAM_OFFSET_SECONDS = 12;
 
 // Base directory for recordings.
 const RECORD_BASE = path.join(os.homedir(), '0Radio', '3abn');
@@ -436,7 +436,7 @@ async function removeEmptyDirs(dir) {
 // ======================== MAIN LOOP ==========================
 
 async function runLoop() {
-  log('Starting 3ABN Recorder Daemon (Improved)...');
+  log('Starting 3ABN Recorder Service...');
 
   let currentRecording = null; // { signature, process, outFile, endTime }
   let lastCleanupDay = '';
@@ -453,12 +453,14 @@ async function runLoop() {
   while (true) {
     try {
       const now = new Date();
-      const todayStr = formatDate(now);
+      // Use effective time (shifted by STREAM_OFFSET_SECONDS) for all scheduling logic
+      const effectiveTime = new Date(now.getTime() + STREAM_OFFSET_SECONDS * 1000);
+      const todayStr = formatDate(effectiveTime);
 
       // Get Today's schedule (fast from cache usually)
       const schedObj = await scheduler.getSchedule(todayStr); // should be cached
 
-      const nowSeconds = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+      const nowSeconds = effectiveTime.getHours() * 3600 + effectiveTime.getMinutes() * 60 + effectiveTime.getSeconds();
 
       // Find active slot
       let activeItem = null;
@@ -656,15 +658,15 @@ async function runLoop() {
       // Every loop, check if we need to fetch tomorrow?
       // Only do it once. `ensureInBackground` handles dedup.
       // Do it if we are past noon.
-      if (now.getHours() >= 12) {
-        const tmr = new Date(now);
+      if (effectiveTime.getHours() >= 12) {
+        const tmr = new Date(effectiveTime);
         tmr.setDate(tmr.getDate() + 1);
         scheduler.ensureInBackground(formatDate(tmr));
       }
 
       // Cleanup logic: Daily at 3 AM
-      const currentDay = formatDate(now);
-      if (now.getHours() === 3 && currentDay !== lastCleanupDay) {
+      const currentDay = formatDate(effectiveTime);
+      if (effectiveTime.getHours() === 3 && currentDay !== lastCleanupDay) {
         lastCleanupDay = currentDay;
         dailyLegacyCleanup().catch(e => log('Legacy cleanup error:', e));
       }

@@ -195,7 +195,8 @@ async function runBrowserSession() {
       }
 
       if (old != power) {
-        // process.stdout.write(`\rForward Power=${power}     \r`);
+        log(`Forward Power=${power}`);
+        //process.stdout.write(`\rForward Power=${power}     \r`);
         // For service logs, maybe just log significant changes or periodically?
         // Keeping stdout write for interactive/journalctl -f
       }
