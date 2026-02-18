@@ -10,6 +10,19 @@ SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 # Ensure user systemd directory exists
 mkdir -p "$SYSTEMD_USER_DIR"
 
+# Volume Guardian Service (User Level)
+cat <<EOF > "$SYSTEMD_USER_DIR/threeabn-volume-guardian.service"
+[Unit]
+Description=3ABN volume guardian
+
+[Service]
+ExecStart=$APP_DIR/threeabn-volume-guardian.sh
+Restart=always
+
+[Install]
+WantedBy=default.target
+EOF
+
 # Recorder Service (User Level)
 cat <<EOF > "$SYSTEMD_USER_DIR/threeabn-recorder.service"
 [Unit]
@@ -77,6 +90,7 @@ echo "Then enable and start the user services:"
 echo "  systemctl --user enable --now threeabn-recorder"
 echo "  systemctl --user enable --now threeabn-player"
 echo "  systemctl --user enable --now ecreso-keepalive"
+echo "  systemctl --user enable --now threeabn-volume-guardian"
 echo ""
 echo "To ensure these run on boot without login, enable lingering:"
 echo "  loginctl enable-linger $USER"
