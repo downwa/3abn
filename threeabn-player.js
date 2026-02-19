@@ -331,6 +331,33 @@ async function mainLoop() {
   const player3 = new MpvPlayer(3); // Override player
   let activePlayer = null; // ref to p1 or p2
   let isDucked = false;
+  let isRamping = false;
+
+  const volumeGuardian = async () => {
+    log("[Guardian] Started.");
+    while (true) {
+      await sleep(2000);
+      if (isRamping) continue;
+
+      const targetVol = isDucked ? 10 : 100;
+
+      if (activePlayer) {
+        try {
+          const vol = await activePlayer.getProperty('volume');
+          // mpv returns volume as floating point, e.g. 100.000000
+          if (vol !== null && Math.abs(parseFloat(vol) - targetVol) > 0.1) {
+            log(`[Guardian] Correcting volume for Player ${activePlayer.id} to ${targetVol} (was ${vol})`);
+            activePlayer.setVolume(targetVol);
+          }
+        } catch (e) {
+          // Ignore transient errors
+        }
+      }
+    }
+  };
+
+  // Start guardian in background
+  volumeGuardian();
 
   // Helper to crossfade to new file
   const crossfadeTo = async (file, startOffset = 0) => {
@@ -366,15 +393,24 @@ async function mainLoop() {
     log(`[Player ${next.id}] Playback started, beginning ramp.`);
 
     // Animate
+    isRamping = true;
     const steps = 20;
     const dur = CROSSFADE_DURATION * 1000;
     const stepTime = dur / steps;
 
-    for (let i = 0; i <= steps; i++) {
-      const vol = Math.floor(i * (100 / steps));
-      next.setVolume(vol);
-      if (current) current.setVolume(100 - vol);
-      await sleep(stepTime);
+    try {
+      for (let i = 0; i <= steps; i++) {
+        const vol = Math.floor(i * (100 / steps));
+        next.setVolume(vol);
+        if (current) current.setVolume(100 - vol);
+        await sleep(stepTime);
+      }
+      // Ensure final volume is reached and set
+      const finalVol = isDucked ? 10 : 100;
+      next.setVolume(finalVol);
+      log(`[Player ${next.id}] Ramp complete. Volume set to ${finalVol}.`);
+    } finally {
+      isRamping = false;
     }
 
     if (current) current.stop();
@@ -553,11 +589,18 @@ async function mainLoop() {
             if (ovr) {
               log(`[Override] Triggering ${path.basename(ovr.path)} for ${ovr.duration}s`);
               // Duck
+              isRamping = true;
               isDucked = true;
-              for (let v = 100; v >= 10; v -= 10) {
-                player1.setVolume(v);
-                player2.setVolume(v);
-                await sleep(100);
+              try {
+                for (let v = 100; v >= 10; v -= 10) {
+                  player1.setVolume(v);
+                  player2.setVolume(v);
+                  await sleep(100);
+                }
+                player1.setVolume(10);
+                player2.setVolume(10);
+              } finally {
+                isRamping = false;
               }
 
               // Play Override
@@ -582,11 +625,18 @@ async function mainLoop() {
               player3.stop();
 
               // Unduck
-              isDucked = false;
-              for (let v = 10; v <= 100; v += 10) {
-                player1.setVolume(v);
-                player2.setVolume(v);
-                await sleep(100);
+              isRamping = true;
+              try {
+                for (let v = 10; v <= 100; v += 10) {
+                  player1.setVolume(v);
+                  player2.setVolume(v);
+                  await sleep(100);
+                }
+                player1.setVolume(100);
+                player2.setVolume(100);
+              } finally {
+                isDucked = false;
+                isRamping = false;
               }
               log('[Override] Finished.');
             }
