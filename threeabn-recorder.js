@@ -414,8 +414,11 @@ async function cleanupProgramDuplicates(code, keepFile) {
  */
 async function dailyLegacyCleanup() {
   log('[Cleanup] Starting legacy 3AM purge...');
-  const oneYearAgo = Date.now() - 365 * 24 * 3600 * 1000;
+  const now = Date.now();
+  const oneYearAgo = now - 365 * 24 * 3600 * 1000;
+  const thirtyDaysAgo = now - 30 * 24 * 3600 * 1000;
 
+  // Cleanup recordings (> 1yr)
   const files = await recursiveList(RECORD_BASE);
   for (const f of files) {
     try {
@@ -429,6 +432,24 @@ async function dailyLegacyCleanup() {
     }
   }
   await removeEmptyDirs(RECORD_BASE);
+
+  // Cleanup schedule cache (> 30 days)
+  try {
+    if (fs.existsSync(SCHED_TMP_DIR)) {
+      const schedFiles = await fsp.readdir(SCHED_TMP_DIR);
+      for (const fname of schedFiles) {
+        const fpath = path.join(SCHED_TMP_DIR, fname);
+        const stats = await fsp.stat(fpath);
+        if (stats.mtimeMs < thirtyDaysAgo) {
+          await fsp.unlink(fpath);
+          log(`[Cleanup] Deleted legacy schedule: ${fname}`);
+        }
+      }
+    }
+  } catch (e) {
+    log(`[Cleanup] Error cleaning schedule cache: ${e.message}`);
+  }
+
   log('[Cleanup] Legacy purge complete.');
 }
 
@@ -553,15 +574,10 @@ async function runLoop() {
           continue;
         }
 
-        // LATE CHECK
-        // Use actual wall-clock time to decide if we are too late for the program.
-        const wallClockSecs = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
-        const secondsFoundLate = wallClockSecs - activeItem.secondsSinceMidnight;
-
-        if (secondsFoundLate > GRACE_PERIOD_SECONDS) {
+        if (secondsPastStart > GRACE_PERIOD_SECONDS) {
           // TOO LATE
           const remaining = activeItem.endTime - nowSeconds;
-          log(`Too late to start ${activeItem.program_code} (${secondsFoundLate}s > ${GRACE_PERIOD_SECONDS}s grace). Skipping.`);
+          log(`Too late to start ${activeItem.program_code} (${secondsPastStart}s > ${GRACE_PERIOD_SECONDS}s grace). Skipping.`);
           log(`Sleeping ${remaining}s until next slot.`);
 
           if (remaining > 0) await sleep(remaining * 1000);
@@ -612,26 +628,27 @@ async function runLoop() {
         // Overlap Handoff
         await sleep(2000); // 2s overlap?
         if (currentRecording) {
-          stopRecording(currentRecording.process).then(() => {
+          const toFinalize = currentRecording;
+          stopRecording(toFinalize.process).then(() => {
             // Rename temp to final
             try {
-              if (fs.existsSync(currentRecording.tempFile)) {
-                fs.renameSync(currentRecording.tempFile, currentRecording.outFile);
-                log(`[Atomic] Finalized recording: ${path.basename(currentRecording.outFile)}`);
+              if (fs.existsSync(toFinalize.tempFile)) {
+                fs.renameSync(toFinalize.tempFile, toFinalize.outFile);
+                log(`[Atomic] Finalized recording: ${path.basename(toFinalize.outFile)}`);
               }
             } catch (e) {
-              log(`[Atomic] Error finalizing ${currentRecording.outFile}: ${e.message}`);
+              log(`[Atomic] Error finalizing ${toFinalize.outFile}: ${e.message}`);
             }
             // Async analysis of the file we just finished
             // Only analyze if it finishes at the end of the hour
-            if (currentRecording.endTime % 3600 === 0) {
-              analyzeFileForDTMF(currentRecording.outFile, 60000).then(tones => {
+            if (toFinalize.endTime % 3600 === 0) {
+              analyzeFileForDTMF(toFinalize.outFile, 60000).then(tones => {
                 if (tones && tones.length > 0) {
                   // Use the first #4 detected for calibration
                   const tone = tones.find(t => t.digit === '#4');
                   if (tone && tone.fromEnd) {
                     const drift = tone.fromEnd - 13;
-                    const newOffset = Math.round((STREAM_OFFSET_SECONDS - drift) * 10) / 10;
+                    const newOffset = Math.round((STREAM_OFFSET_SECONDS + drift) * 10) / 10;
                     log(`[Calibration] Detected #4 at ${tone.fromEnd}s from end. Drift: ${drift.toFixed(2)}s. Adjusting offset: ${STREAM_OFFSET_SECONDS} -> ${newOffset}`);
                     saveOffset(newOffset).catch(e => log('Calibration Save Error:', e));
                   }
@@ -639,7 +656,7 @@ async function runLoop() {
               }).catch(e => log('DTMF Error:', e));
             }
             // Async cleanup of duplicates
-            cleanupProgramDuplicates(currentRecording.programCode, currentRecording.outFile).catch(e => log('Cleanup error:', e));
+            cleanupProgramDuplicates(toFinalize.programCode, toFinalize.outFile).catch(e => log('Cleanup error:', e));
           });
         }
 
