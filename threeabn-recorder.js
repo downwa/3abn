@@ -644,11 +644,27 @@ async function runLoop() {
             if (toFinalize.endTime % 3600 === 0) {
               analyzeFileForDTMF(toFinalize.outFile, 60000).then(tones => {
                 if (tones && tones.length > 0) {
-                  // Use the first #4 detected for calibration
-                  const tone = tones.find(t => t.digit === '#4');
-                  if (tone && tone.fromEnd) {
+                  // Guardrails: Only count the LAST #4 tone, and only if it's in the last minute
+                  const relevantTones = tones.filter(t => t.digit === '#4' && t.fromEnd < 60);
+                  const tone = relevantTones[relevantTones.length - 1];
+
+                  if (tone) {
                     const drift = tone.fromEnd - 13;
-                    const newOffset = Math.round((STREAM_OFFSET_SECONDS + drift) * 10) / 10;
+
+                    // Guardrail: Never adjust the offset by more than 60 seconds
+                    if (Math.abs(drift) > 60) {
+                      log(`[Calibration] Ignoring large drift: ${drift.toFixed(2)}s. No adjustment made.`);
+                      return;
+                    }
+
+                    let newOffset = STREAM_OFFSET_SECONDS + drift;
+
+                    // Normalization: Ensure offset stays within [-1800, 1800] range.
+                    // This "snaps" any hour-long jumps back to the correct hour.
+                    newOffset = ((newOffset + 1800) % 3600);
+                    if (newOffset < 0) newOffset += 3600;
+                    newOffset = Math.round((newOffset - 1800) * 10) / 10;
+
                     log(`[Calibration] Detected #4 at ${tone.fromEnd}s from end. Drift: ${drift.toFixed(2)}s. Adjusting offset: ${STREAM_OFFSET_SECONDS} -> ${newOffset}`);
                     saveOffset(newOffset).catch(e => log('Calibration Save Error:', e));
                   }
