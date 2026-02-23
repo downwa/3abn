@@ -12,7 +12,7 @@ function log(...args) {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function getFileDuration(filePath) {
+export async function getFileDuration(filePath) {
     try {
         const { stdout } = await execPromise(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`);
         const dur = parseFloat(stdout.trim());

@@ -14,7 +14,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import puppeteer from 'puppeteer';
-import { analyzeFileForDTMF } from './dtmf-analyzer.js';
+import { analyzeFileForDTMF, getFileDuration } from './dtmf-analyzer.js';
 
 const fsp = fs.promises;
 
@@ -629,15 +629,26 @@ async function runLoop() {
         await sleep(2000); // 2s overlap?
         if (currentRecording) {
           const toFinalize = currentRecording;
-          stopRecording(toFinalize.process).then(() => {
+          stopRecording(toFinalize.process).then(async () => {
             // Rename temp to final
             try {
               if (fs.existsSync(toFinalize.tempFile)) {
                 fs.renameSync(toFinalize.tempFile, toFinalize.outFile);
                 log(`[Atomic] Finalized recording: ${path.basename(toFinalize.outFile)}`);
+
+                // Verify duration
+                const actualDuration = await getFileDuration(toFinalize.outFile);
+                const minAllowed = toFinalize.scheduledDuration - 5;
+                if (actualDuration < minAllowed) {
+                  log(`[Verification] Recording TOO SHORT (${actualDuration.toFixed(1)}s < ${minAllowed}s). Deleting.`);
+                  try { await fsp.unlink(toFinalize.outFile); } catch (e) { /* ignore */ }
+                  return; // Don't analyze or cleanup duplicates if we just deleted the file
+                }
+                log(`[Verification] Recording duration OK (${actualDuration.toFixed(1)}s / ${toFinalize.scheduledDuration}s).`);
               }
             } catch (e) {
               log(`[Atomic] Error finalizing ${toFinalize.outFile}: ${e.message}`);
+              return;
             }
             // Async analysis of the file we just finished
             // Only analyze if it finishes at the end of the hour
@@ -682,7 +693,8 @@ async function runLoop() {
           process: p,
           outFile,
           tempFile,
-          endTime: activeItem.endTime
+          endTime: activeItem.endTime,
+          scheduledDuration: idealDuration
         };
 
         // Self-tuning sleep
