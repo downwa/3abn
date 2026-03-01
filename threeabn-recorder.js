@@ -113,7 +113,7 @@ class ScheduleManager {
       if (stats.size > 0) {
         const content = await fsp.readFile(filePath, 'utf-8');
         const sched = JSON.parse(content);
-        if (sched && Array.isArray(sched.schedule)) {
+        if (sched && Array.isArray(sched.schedule) && sched.schedule.length > 0) {
           // Verify date inside?
           this.cache.set(dateStr, sched);
           return sched;
@@ -139,7 +139,13 @@ class ScheduleManager {
     const filePath = path.join(SCHED_TMP_DIR, `${dateStr}.json`);
     fsp.stat(filePath).then(stats => {
       if (stats.size > 0) {
-        return fsp.readFile(filePath, 'utf-8').then(c => JSON.parse(c)).then(s => this.cache.set(dateStr, s));
+        return fsp.readFile(filePath, 'utf-8').then(c => JSON.parse(c)).then(s => {
+          if (Array.isArray(s.schedule) && s.schedule.length > 0) {
+            this.cache.set(dateStr, s);
+          } else {
+            throw new Error('Empty schedule');
+          }
+        });
       }
       throw new Error('Not found');
     }).catch(() => {
@@ -339,6 +345,26 @@ class ScheduleManager {
         ...item,
         secondsSinceMidnight: parseTimeToSeconds(item.timeText)
       })).sort((a, b) => a.secondsSinceMidnight - b.secondsSinceMidnight);
+
+      // If the schedule is empty, we must generate an artificial one to avoid gaps.
+      if (schedule.length === 0) {
+        log(`Warning: Scraped schedule for ${targetDateStr} is empty. Generating artificial hourly slots.`);
+        for (let h = 0; h < 24; h++) {
+          const hourStr = String(h).padStart(2, '0');
+          const displayHour = h === 0 ? 12 : (h > 12 ? h - 12 : h);
+          const ampm = h < 12 ? 'AM' : 'PM';
+          const nameStr = String(h + 1).padStart(2, '0');
+          const timeText = `${String(displayHour).padStart(2, '0')}:00 ${ampm}`;
+
+          schedule.push({
+            series_title: `3ABN Hour ${nameStr}`,
+            program_title: `3ABN Hour ${nameStr}`,
+            program_code: `3ABN-H${hourStr}`,
+            timeText: timeText,
+            secondsSinceMidnight: h * 3600
+          });
+        }
+      }
 
       const schedObj = { date: targetDateStr, schedule };
 
