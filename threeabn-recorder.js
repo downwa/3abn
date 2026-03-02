@@ -686,7 +686,7 @@ async function runLoop() {
                   const tone = relevantTones[relevantTones.length - 1];
 
                   if (tone) {
-                    const drift = tone.fromEnd - 13;
+                    const drift = tone.fromEnd - 20;
 
                     // Guardrail: Never adjust the offset by more than 60 seconds
                     if (Math.abs(drift) > 60) {
